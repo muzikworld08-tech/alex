@@ -1,0 +1,199 @@
+crypto-app/
+│
+├── server.js
+├── models/
+│   ├── User.js
+│   ├── Transaction.js
+│
+├── routes/
+│   ├── auth.js
+│   ├── user.js
+│   ├── admin.js
+│
+├── middleware/
+│   ├── auth.js
+│   ├── admin.js
+│
+├── public/
+│   ├── index.html
+│   ├── dashboard.html
+│
+├── .env
+├── package.json
+npm init -y
+npm install express mongoose bcryptjs jsonwebtoken dotenv cors
+require("dotenv").config();
+const express = require("express");
+const mongoose = require("mongoose");
+const cors = require("cors");
+
+const app = express();
+
+app.use(express.json());
+app.use(cors());
+
+mongoose.connect(process.env.MONGO_URI)
+.then(() => console.log("MongoDB connected"))
+.catch(err => console.log(err));
+
+app.use("/api/auth", require("./routes/auth"));
+app.use("/api/user", require("./routes/user"));
+app.use("/api/admin", require("./routes/admin"));
+
+app.listen(5000, () => console.log("Server running on port 5000"));
+const mongoose = require("mongoose");
+
+const UserSchema = new mongoose.Schema({
+    username: String,
+    email: String,
+    password: String,
+    balance: { type: Number, default: 0 },
+    isAdmin: { type: Boolean, default: false }
+});
+
+module.exports = mongoose.model("User", UserSchema);
+const mongoose = require("mongoose");
+
+const TransactionSchema = new mongoose.Schema({
+    userId: String,
+    type: String, // deposit or withdrawal
+    amount: Number,
+    status: { type: String, default: "pending" }, // pending, approved, rejected
+    createdAt: { type: Date, default: Date.now }
+});
+
+module.exports = mongoose.model("Transaction", TransactionSchema);
+const router = require("express").Router();
+const User = require("../models/User");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+
+// Register
+router.post("/register", async (req, res) => {
+    const { username, email, password } = req.body;
+
+    const hash = await bcrypt.hash(password, 10);
+
+    const user = new User({ username, email, password: hash });
+    await user.save();
+
+    res.json("User registered");
+});
+
+// Login
+router.post("/login", async (req, res) => {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json("User not found");
+
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) return res.status(400).json("Wrong password");
+
+    const token = jwt.sign({ id: user._id, isAdmin: user.isAdmin }, "secret");
+
+    res.json({ token });
+});
+
+module.exports = router;
+const jwt = require("jsonwebtoken");
+
+module.exports = (req, res, next) => {
+    const token = req.header("Authorization");
+    if (!token) return res.status(401).json("Access denied");
+
+    try {
+        const verified = jwt.verify(token, "secret");
+        req.user = verified;
+        next();
+    } catch {
+        res.status(400).json("Invalid token");
+    }
+};
+module.exports = (req, res, next) => {
+    if (!req.user.isAdmin) {
+        return res.status(403).json("Admin only");
+    }
+    next();
+};
+const router = require("express").Router();
+const auth = require("../middleware/auth");
+const Transaction = require("../models/Transaction");
+
+// Deposit (virtual/manual)
+router.post("/deposit", auth, async (req, res) => {
+    const tx = new Transaction({
+        userId: req.user.id,
+        type: "deposit",
+        amount: req.body.amount
+    });
+
+    await tx.save();
+    res.json("Deposit request created");
+});
+
+// Withdrawal request
+router.post("/withdraw", auth, async (req, res) => {
+    const tx = new Transaction({
+        userId: req.user.id,
+        type: "withdrawal",
+        amount: req.body.amount
+    });
+
+    await tx.save();
+    res.json("Withdrawal request submitted");
+});
+
+module.exports = router;
+const router = require("express").Router();
+const auth = require("../middleware/auth");
+const admin = require("../middleware/admin");
+const Transaction = require("../models/Transaction");
+const User = require("../models/User");
+
+// Get all transactions
+router.get("/transactions", auth, admin, async (req, res) => {
+    const txs = await Transaction.find();
+    res.json(txs);
+});
+
+// Approve withdrawal
+router.post("/approve/:id", auth, admin, async (req, res) => {
+    const tx = await Transaction.findById(req.params.id);
+
+    if (tx.type === "withdrawal") {
+        const user = await User.findById(tx.userId);
+        user.balance -= tx.amount;
+        await user.save();
+    }
+
+    if (tx.type === "deposit") {
+        const user = await User.findById(tx.userId);
+        user.balance += tx.amount;
+        await user.save();
+    }
+
+    tx.status = "approved";
+    await tx.save();
+
+    res.json("Transaction approved");
+});
+
+// Reject
+router.post("/reject/:id", auth, admin, async (req, res) => {
+    const tx = await Transaction.findById(req.params.id);
+    tx.status = "rejected";
+    await tx.save();
+
+    res.json("Transaction rejected");
+});
+
+module.exports = router;
+router.get("/recent-withdrawals", async (req, res) => {
+    const txs = await Transaction.find({ 
+        type: "withdrawal", 
+        status: "approved" 
+    }).limit(10).sort({ createdAt: -1 });
+
+    res.json(txs);
+});
